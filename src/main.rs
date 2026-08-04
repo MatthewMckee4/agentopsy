@@ -20,6 +20,10 @@ use crate::trace::TraceCache;
 
 const PAGE_CACHE_TTL: Duration = Duration::from_millis(250);
 
+pub(crate) fn saturating_sum(values: impl Iterator<Item = u64>) -> u64 {
+    values.fold(0, u64::saturating_add)
+}
+
 #[derive(Clone)]
 struct AppState {
     cache: Arc<Mutex<AppCache>>,

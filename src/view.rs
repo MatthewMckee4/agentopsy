@@ -2,7 +2,8 @@ use std::cmp::Reverse;
 use std::fmt::{self, Write};
 use std::path::Path;
 
-use crate::trace::{Dashboard, Diagnostics, Operation, Session, Turn, saturating_sum};
+use crate::saturating_sum;
+use crate::trace::{Dashboard, Diagnostics, Operation, Session, Turn};
 
 pub fn render(dashboard: &Dashboard) -> Result<String, fmt::Error> {
     let mut html = String::from(HEAD);
@@ -529,7 +530,7 @@ mod tests {
 
     use jiff::Timestamp;
 
-    use super::{duration, escape, render};
+    use super::{anomaly_count, duration, escape, render};
     use crate::trace::{
         Dashboard, Diagnostics, Operation, OperationStatus, Session, SessionStatus, ToolSegment,
         Turn, TurnStatus,
@@ -549,6 +550,17 @@ mod tests {
             escape("<tool a='b'>&\""),
             "&lt;tool a=&#39;b&#39;&gt;&amp;&quot;"
         );
+    }
+
+    #[test]
+    fn counts_detailed_invalid_timestamp_once() {
+        let diagnostics = Diagnostics {
+            invalid_timestamps: 1,
+            parse_errors: vec!["line 1: invalid started_at timestamp".to_owned()],
+            ..Diagnostics::default()
+        };
+
+        assert_eq!(anomaly_count(&diagnostics), 1);
     }
 
     #[test]

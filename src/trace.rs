@@ -12,6 +12,8 @@ use jiff::Timestamp;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::saturating_sum;
+
 #[derive(Clone, Debug)]
 pub struct Dashboard {
     pub cache_hits: usize,
@@ -879,10 +881,6 @@ const fn json_type(value: &Value) -> &'static str {
     }
 }
 
-pub fn saturating_sum(values: impl Iterator<Item = u64>) -> u64 {
-    values.fold(0, u64::saturating_add)
-}
-
 fn message_content(payload: &Value) -> Option<&str> {
     payload
         .get("content")?
@@ -1221,8 +1219,10 @@ fn raw_output_reports_failure(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{OperationStatus, parse_reader, saturating_sum, tool_summary};
+    use super::{OperationStatus, parse_reader, tool_summary};
     use std::io::Cursor;
+
+    use crate::saturating_sum;
 
     #[test]
     fn excludes_turn_gaps_and_merges_overlapping_tools() {
@@ -1427,6 +1427,25 @@ mod tests {
         assert!(session.diagnostics.parse_errors.iter().any(|error| {
             error.contains("line 2: turn `one` duration_ms") && error.contains("observed string")
         }));
+    }
+
+    #[test]
+    fn reports_invalid_payload_timestamp_once_with_context() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","started_at":"now","turn_id":"one"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.diagnostics.invalid_timestamps, 1);
+        assert_eq!(session.diagnostics.parse_errors.len(), 1);
+        assert!(session.diagnostics.parse_errors[0].contains("line 1: started_at"));
     }
 
     #[test]
