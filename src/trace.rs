@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
@@ -61,7 +62,9 @@ pub struct Diagnostics {
     pub overlapping_tool_ms: u64,
     pub parse_errors: Vec<String>,
     pub trace_bytes: u64,
+    pub timing_errors: Vec<String>,
     pub unassigned_calls: usize,
+    pub unestimated_turns: usize,
     pub unmatched_calls: usize,
     pub unmatched_outputs: usize,
 }
@@ -92,10 +95,12 @@ pub struct Turn {
     pub duration_ms: u64,
     pub ended_at: Timestamp,
     pub id: String,
+    pub model_duration_ms: Option<u64>,
     pub started_at: Timestamp,
     pub status: TurnStatus,
     pub tool_duration_ms: u64,
     pub tool_segments: Vec<ToolSegment>,
+    pub wall_duration_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,6 +143,7 @@ pub struct Operation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationStatus {
+    Ambiguous,
     Returned,
     Failed,
     Pending,
@@ -146,6 +152,7 @@ pub enum OperationStatus {
 impl OperationStatus {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Ambiguous => "ambiguous",
             Self::Returned => "returned",
             Self::Failed => "failed",
             Self::Pending => "pending",
@@ -340,7 +347,8 @@ struct OutputEnvelope<'a> {
 
 #[derive(Deserialize)]
 struct OutputPayload<'a> {
-    call_id: Option<&'a str>,
+    #[serde(borrow)]
+    call_id: Option<Cow<'a, str>>,
 }
 
 #[derive(Clone, Copy)]
@@ -366,6 +374,7 @@ impl<'a> EventHeader<'a> {
 
 #[derive(Clone)]
 struct TurnBuilder {
+    active_duration_ms: Option<u64>,
     ended_at: Option<Timestamp>,
     id: String,
     started_at: Timestamp,
@@ -565,14 +574,16 @@ impl SessionParser {
     }
 
     fn start_turn(&mut self, payload: &Value, timestamp: Option<Timestamp>, line_number: usize) {
-        let started_at = self
-            .payload_timestamp(payload, "started_at", line_number)
+        let payload_started_at = self.payload_timestamp(payload, "started_at", line_number);
+        let started_at = payload_started_at
+            .map(|bucket_start| precise_timestamp_in_bucket(bucket_start, timestamp))
             .or(timestamp);
         if let Some(started_at) = started_at {
             let id = string_field(payload, "turn_id")
                 .map_or_else(|| format!("turn-{line_number}"), ToOwned::to_owned);
             let index = self.turns.len();
             self.turns.push(TurnBuilder {
+                active_duration_ms: None,
                 ended_at: None,
                 id: id.clone(),
                 started_at,
@@ -593,50 +604,51 @@ impl SessionParser {
         let Some(id) = string_field(payload, "turn_id") else {
             return;
         };
-        let completed_at = self.payload_timestamp(payload, "completed_at", line_number);
+        let completed_at = self
+            .payload_timestamp(payload, "completed_at", line_number)
+            .and_then(|bucket_start| {
+                let bucket_end = match bucket_start.checked_add(Duration::from_secs(1)) {
+                    Ok(bucket_end) => bucket_end,
+                    Err(error) => {
+                        self.diagnostics.invalid_timestamps += 1;
+                        self.record_parse_error(
+                            line_number,
+                            format!("turn `{id}` completed_at bucket exceeds the supported timestamp range: {error}"),
+                        );
+                        return None;
+                    }
+                };
+                Some(
+                    envelope_timestamp
+                        .filter(|timestamp| *timestamp >= bucket_start && *timestamp < bucket_end)
+                        .unwrap_or(bucket_end),
+                )
+            });
         let recorded_duration_ms = self.recorded_duration(payload, id, line_number);
         if let Some(index) = self.turn_indexes.get(id).copied() {
-            let observed_start = self.turns[index].started_at;
-            let (logical_start, logical_end) = match (recorded_duration_ms, completed_at) {
-                (Some(duration_ms), Some(ended_at)) => {
-                    match ended_at.checked_sub(Duration::from_millis(duration_ms)) {
-                        Ok(started_at) => (started_at, Some(ended_at)),
-                        Err(error) => {
-                            self.record_parse_error(
-                                line_number,
-                                format!(
-                                    "turn `{id}` duration_ms {duration_ms} exceeds the supported timestamp range: {error}"
-                                ),
-                            );
-                            (observed_start, Some(ended_at))
-                        }
-                    }
+            let started_at = self.turns[index].started_at;
+            let active_duration_ms = recorded_duration_ms.filter(|duration_ms| {
+                if let Err(error) = started_at.checked_add(Duration::from_millis(*duration_ms)) {
+                    self.record_parse_error(
+                        line_number,
+                        format!(
+                            "turn `{id}` duration_ms {duration_ms} exceeds the supported timestamp range: {error}"
+                        ),
+                    );
+                    false
+                } else {
+                    true
                 }
-                (Some(duration_ms), None) => {
-                    match observed_start.checked_add(Duration::from_millis(duration_ms)) {
-                        Ok(ended_at) => (observed_start, Some(ended_at)),
-                        Err(error) => {
-                            self.record_parse_error(
-                                line_number,
-                                format!(
-                                    "turn `{id}` duration_ms {duration_ms} exceeds the supported timestamp range: {error}"
-                                ),
-                            );
-                            (observed_start, envelope_timestamp)
-                        }
-                    }
-                }
-                (None, completed_at) => (observed_start, completed_at.or(envelope_timestamp)),
-            };
-            if let Some(ended_at) = logical_end {
-                if ended_at < logical_start {
+            });
+            if let Some(ended_at) = completed_at.or(envelope_timestamp) {
+                if ended_at < started_at {
                     self.record_parse_error(
                         line_number,
                         format!("turn `{id}` completed_at precedes started_at"),
                     );
                 }
-                self.turns[index].started_at = logical_start.min(ended_at);
-                self.turns[index].ended_at = Some(ended_at.max(logical_start));
+                self.turns[index].active_duration_ms = active_duration_ms;
+                self.turns[index].ended_at = Some(ended_at.max(started_at));
                 self.turns[index].status = status;
             }
         }
@@ -746,6 +758,7 @@ impl SessionParser {
             }
         };
         if let Some(call_id) = envelope.payload.call_id {
+            let call_id = call_id.as_ref();
             if self
                 .outputs
                 .insert(
@@ -788,13 +801,15 @@ impl SessionParser {
         self.diagnostics.unmatched_outputs = self
             .outputs
             .len()
+            .saturating_add(self.diagnostics.duplicate_output_ids)
             .saturating_add(self.diagnostics.missing_output_ids);
         operations.sort_by_key(|operation| operation.started_at);
         populate_tool_segments(&mut turns, &operations, &mut self.diagnostics);
 
         let active_duration_ms = saturating_sum(turns.iter().map(|turn| turn.duration_ms));
         let tool_duration_ms = saturating_sum(turns.iter().map(|turn| turn.tool_duration_ms));
-        let model_duration_ms = active_duration_ms.saturating_sub(tool_duration_ms);
+        let model_duration_ms =
+            saturating_sum(turns.iter().filter_map(|turn| turn.model_duration_ms));
         // Wall span and last activity intentionally use persisted envelope timestamps. Turn
         // bounds use payload timing receipts and exclude persistence delay.
         let wall_duration_ms = match (self.first_event, self.last_event) {
@@ -870,6 +885,18 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
+fn precise_timestamp_in_bucket(
+    bucket_start: Timestamp,
+    envelope_timestamp: Option<Timestamp>,
+) -> Timestamp {
+    let bucket_end = bucket_start.checked_add(Duration::from_secs(1)).ok();
+    envelope_timestamp
+        .filter(|timestamp| {
+            *timestamp >= bucket_start && bucket_end.is_some_and(|end| *timestamp < end)
+        })
+        .unwrap_or(bucket_start)
+}
+
 const fn json_type(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -900,6 +927,7 @@ fn finalize_turns(
     {
         diagnostics.inferred_turns = 1;
         builders.push(TurnBuilder {
+            active_duration_ms: None,
             ended_at: Some(ended_at),
             id: "inferred-turn".to_owned(),
             started_at,
@@ -916,14 +944,17 @@ fn finalize_turns(
                 .or(fallback_end)
                 .unwrap_or(builder.started_at)
                 .max(builder.started_at);
+            let wall_duration_ms = elapsed_ms(builder.started_at, ended_at);
             Turn {
-                duration_ms: elapsed_ms(builder.started_at, ended_at),
+                duration_ms: builder.active_duration_ms.unwrap_or(wall_duration_ms),
                 ended_at,
                 id: builder.id,
+                model_duration_ms: None,
                 started_at: builder.started_at,
                 status: builder.status,
                 tool_duration_ms: 0,
                 tool_segments: Vec::new(),
+                wall_duration_ms,
             }
         })
         .collect::<Vec<_>>();
@@ -941,6 +972,10 @@ fn finalize_operations(
     calls
         .into_iter()
         .map(|call| {
+            let ambiguous = call
+                .call_id
+                .as_ref()
+                .is_some_and(|call_id| ambiguous_call_ids.contains(call_id));
             let output = call
                 .call_id
                 .as_ref()
@@ -953,10 +988,11 @@ fn finalize_operations(
                 (Some(start), Some(end)) => Some(elapsed_ms(start, end)),
                 _ => None,
             };
-            let status = match output.as_ref() {
-                Some(output) if output.failed => OperationStatus::Failed,
-                Some(_) => OperationStatus::Returned,
-                None => OperationStatus::Pending,
+            let status = match (ambiguous, output.as_ref()) {
+                (true, _) => OperationStatus::Ambiguous,
+                (false, Some(output)) if output.failed => OperationStatus::Failed,
+                (false, Some(_)) => OperationStatus::Returned,
+                (false, None) => OperationStatus::Pending,
             };
             if output.is_some() {
                 diagnostics.matched_calls += 1;
@@ -970,7 +1006,7 @@ fn finalize_operations(
                         turns.iter().any(|turn| {
                             turn.id == *turn_id
                                 && started_at >= turn.started_at
-                                && started_at <= turn.ended_at
+                                && started_at < turn.ended_at
                         })
                     })
                 })
@@ -979,7 +1015,7 @@ fn finalize_operations(
                         turns
                             .iter()
                             .find(|turn| {
-                                started_at >= turn.started_at && started_at <= turn.ended_at
+                                started_at >= turn.started_at && started_at < turn.ended_at
                             })
                             .map(|turn| turn.id.clone())
                     })
@@ -1020,7 +1056,7 @@ fn populate_tool_segments(
                 let end = operation.ended_at?;
                 let start = start.max(turn.started_at);
                 let end = end.min(turn.ended_at);
-                (end >= start).then(|| (start, end, operation.name.clone()))
+                (end > start).then(|| (start, end, operation.name.clone()))
             })
             .collect::<Vec<_>>();
         intervals.sort_by_key(|(start, _, _)| *start);
@@ -1056,6 +1092,32 @@ fn populate_tool_segments(
             .collect();
         turn.tool_duration_ms =
             saturating_sum(turn.tool_segments.iter().map(|segment| segment.duration_ms));
+        let wall_active_mismatch = turn.wall_duration_ms.abs_diff(turn.duration_ms) > 1_000;
+        let tool_active_mismatch = turn.tool_duration_ms > turn.duration_ms;
+        if wall_active_mismatch || tool_active_mismatch {
+            diagnostics.unestimated_turns += 1;
+            let reason = match (wall_active_mismatch, tool_active_mismatch) {
+                (true, true) => format!(
+                    "wall span {} ms differs from recorded active duration {} ms by more than 1000 ms, and tool union {} ms exceeds active duration",
+                    turn.wall_duration_ms, turn.duration_ms, turn.tool_duration_ms
+                ),
+                (true, false) => format!(
+                    "wall span {} ms differs from recorded active duration {} ms by more than 1000 ms",
+                    turn.wall_duration_ms, turn.duration_ms
+                ),
+                (false, true) => format!(
+                    "tool union {} ms exceeds recorded active duration {} ms",
+                    turn.tool_duration_ms, turn.duration_ms
+                ),
+                (false, false) => continue,
+            };
+            diagnostics.timing_errors.push(format!(
+                "turn `{}`: {reason}; model time is unavailable",
+                turn.id
+            ));
+        } else {
+            turn.model_duration_ms = Some(turn.duration_ms - turn.tool_duration_ms);
+        }
     }
 
     let union_tool_ms = saturating_sum(turns.iter().map(|turn| turn.tool_duration_ms));
@@ -1312,8 +1374,9 @@ mod tests {
         );
         assert_eq!(
             session.turns[0].ended_at.to_string(),
-            "2026-01-01T00:00:05Z"
+            "2026-01-01T00:00:06Z"
         );
+        assert_eq!(session.turns[0].wall_duration_ms, 6_000);
         assert_eq!(session.diagnostics.unassigned_calls, 1);
         assert_eq!(session.diagnostics.overlapping_tool_ms, 0);
         assert_eq!(
@@ -1327,17 +1390,21 @@ mod tests {
     }
 
     #[test]
-    fn derives_subsecond_start_from_completion_and_duration() {
+    fn uses_fractional_start_and_includes_completed_second() {
         let trace = concat!(
             r#"{"timestamp":"2026-01-01T00:00:00.200Z","type":"event_msg","payload":{"type":"task_started","started_at":1767225600,"turn_id":"one"}}"#,
             "\n",
-            r#"{"timestamp":"2026-01-01T00:00:00.400Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"early","arguments":"{}"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:00.100Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"early","arguments":"{}"}}"#,
             "\n",
             r#"{"timestamp":"2026-01-01T00:00:00.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"inside","arguments":"{}"}}"#,
             "\n",
             r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"inside","output":"done"}}"#,
             "\n",
-            r#"{"timestamp":"2026-01-01T01:00:00Z","type":"event_msg","payload":{"type":"task_complete","completed_at":1767225606,"duration_ms":5500,"turn_id":"one"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:06.100Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"last-second","arguments":"{}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:06.900Z","type":"response_item","payload":{"type":"function_call_output","call_id":"last-second","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:06.950Z","type":"event_msg","payload":{"type":"task_complete","completed_at":1767225606,"duration_ms":6000,"turn_id":"one"}}"#,
         );
 
         let session = parse_reader(
@@ -1348,15 +1415,104 @@ mod tests {
 
         assert_eq!(
             session.turns[0].started_at.to_string(),
-            "2026-01-01T00:00:00.5Z"
+            "2026-01-01T00:00:00.2Z"
         );
         assert_eq!(
             session.turns[0].ended_at.to_string(),
-            "2026-01-01T00:00:06Z"
+            "2026-01-01T00:00:06.95Z"
         );
-        assert_eq!(session.turns[0].duration_ms, 5_500);
-        assert_eq!(session.tool_duration_ms, 500);
+        assert_eq!(session.turns[0].duration_ms, 6_000);
+        assert_eq!(session.turns[0].wall_duration_ms, 6_750);
+        assert_eq!(session.tool_duration_ms, 1_300);
+        assert_eq!(session.turns[0].model_duration_ms, Some(4_700));
         assert_eq!(session.diagnostics.unassigned_calls, 1);
+    }
+
+    #[test]
+    fn keeps_paused_wall_span_separate_from_recorded_active_duration() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","started_at":1767225600,"turn_id":"paused"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"before-pause","arguments":"{}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"before-pause","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:59:59Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"after-pause","arguments":"{}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T01:00:00Z","type":"response_item","payload":{"type":"function_call_output","call_id":"after-pause","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T01:00:01Z","type":"event_msg","payload":{"type":"task_complete","completed_at":1767229200,"duration_ms":5000,"turn_id":"paused"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.turns[0].duration_ms, 5_000);
+        assert_eq!(session.turns[0].wall_duration_ms, 3_601_000);
+        assert_eq!(session.turns[0].tool_duration_ms, 2_000);
+        assert_eq!(session.turns[0].tool_segments.len(), 2);
+        assert_eq!(session.model_duration_ms, 0);
+        assert_eq!(session.turns[0].model_duration_ms, None);
+        assert_eq!(session.diagnostics.unestimated_turns, 1);
+        assert!(session.diagnostics.timing_errors[0].contains("turn `paused`"));
+        assert!(session.diagnostics.timing_errors[0].contains("wall span 3601000 ms"));
+    }
+
+    #[test]
+    fn reports_turn_when_tool_union_exceeds_recorded_active_duration() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","started_at":1767225600,"turn_id":"inconsistent"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","completed_at":1767225604,"duration_ms":1000,"turn_id":"inconsistent"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.active_duration_ms, 1_000);
+        assert_eq!(session.tool_duration_ms, 2_000);
+        assert_eq!(session.model_duration_ms, 0);
+        assert_eq!(session.diagnostics.unestimated_turns, 1);
+        assert!(session.diagnostics.timing_errors.iter().any(|error| {
+            error.contains("turn `inconsistent`")
+                && error.contains("tool union 2000 ms")
+                && error.contains("active duration 1000 ms")
+                && error.contains("model time is unavailable")
+        }));
+    }
+
+    #[test]
+    fn matches_escaped_output_call_id() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"escaped\nid","arguments":"{}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"escaped\nid","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.operations[0].call_id, "escaped\nid");
+        assert_eq!(session.operations[0].status, OperationStatus::Returned);
+        assert_eq!(session.operations[0].duration_ms, Some(1_000));
+        assert_eq!(session.diagnostics.matched_calls, 1);
     }
 
     #[test]
@@ -1496,6 +1652,12 @@ mod tests {
                 .iter()
                 .all(|operation| operation.duration_ms.is_none())
         );
+        assert!(
+            session
+                .operations
+                .iter()
+                .all(|operation| operation.status == OperationStatus::Ambiguous)
+        );
         assert_eq!(session.diagnostics.duplicate_call_ids, 1);
         assert!(session.diagnostics.parse_errors.iter().any(|error| {
             error.contains("line 3: duplicate call_id `duplicate`") && error.contains("ambiguous")
@@ -1524,7 +1686,9 @@ mod tests {
 
         assert_eq!(session.tool_duration_ms, 0);
         assert_eq!(session.operations[0].duration_ms, None);
+        assert_eq!(session.operations[0].status, OperationStatus::Ambiguous);
         assert_eq!(session.diagnostics.duplicate_output_ids, 1);
+        assert_eq!(session.diagnostics.unmatched_outputs, 2);
         assert!(session.diagnostics.parse_errors.iter().any(|error| {
             error.contains("line 4: duplicate output call_id `duplicate`")
                 && error.contains("ambiguous")
