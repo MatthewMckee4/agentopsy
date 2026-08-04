@@ -3,3 +3,15 @@ rules:
     config:
       policies:
         dtolnay/rust-toolchain: any
+  template-injection:
+    ignore:
+      # cargo-dist generates these expressions from its own plan output.
+      - release.yml
+  excessive-permissions:
+    # cargo-dist generates workflow-level release permissions.
+    ignore:
+      - release.yml
+  unpinned-images:
+    # cargo-dist supplies build containers through the generated matrix.
+    ignore:
+      - release.yml
