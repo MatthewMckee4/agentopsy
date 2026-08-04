@@ -1,0 +1,30 @@
+[release]
+current-version = "0.1.0"
+
+version-files = ["Cargo.toml"]
+
+commit-message = "Release v{version}"
+branch-name = "release/v{version}"
+push = true
+confirm = true
+pre-commit-commands = ["cargo update --workspace"]
+
+[release.pull-request]
+title = "Release v{version}"
+body = "Prepare release v{version}."
+base = "main"
+draft = false
+
+[changelog.section-labels]
+"Bug Fixes" = ["bug"]
+"Diagnostics" = ["diagnostics"]
+"Trace Parsing" = ["trace-parsing"]
+"User Interface" = ["ui"]
+"Performance" = ["performance"]
+"Documentation" = ["documentation"]
+
+[changelog]
+ignore-contributors = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
+ignore-labels = ["internal", "ci", "duplicate", "wontfix", "needs-decision"]
+include-contributors = true
+changelog-heading = "{version}"

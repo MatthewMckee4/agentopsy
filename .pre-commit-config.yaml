@@ -1,0 +1,77 @@
+fail_fast: false
+
+exclude: \.svg$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        priority: 0
+      - id: check-case-conflict
+        priority: 0
+      - id: check-merge-conflict
+        priority: 0
+      - id: check-symlinks
+        priority: 0
+      - id: check-yaml
+        priority: 0
+      - id: check-toml
+        priority: 0
+      - id: debug-statements
+        priority: 0
+      - id: end-of-file-fixer
+        priority: 0
+      - id: mixed-line-ending
+        priority: 0
+      - id: detect-private-key
+        priority: 0
+
+  - repo: https://github.com/renovatebot/pre-commit-hooks
+    rev: 44.8.1
+    hooks:
+      - id: renovate-config-validator
+        priority: 0
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.48.0
+    hooks:
+      - id: typos
+        priority: 0
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        priority: 0
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.29.0
+    hooks:
+      - id: zizmor
+        priority: 0
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.37.4
+    hooks:
+      - id: check-github-workflows
+        priority: 0
+
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 1.0.0
+    hooks:
+      - id: mdformat
+        priority: 1
+
+  - repo: https://github.com/DevinR528/cargo-sort
+    rev: v2.1.4
+    hooks:
+      - id: cargo-sort
+        args: ["-g", "-w"]
+        priority: 1
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.49.1
+    hooks:
+      - id: markdownlint-fix
+        priority: 2

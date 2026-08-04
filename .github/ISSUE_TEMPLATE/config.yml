@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/MatthewMckee4/agentopsy#readme
+    about: Please consult the README before creating an issue.
+  - name: Community
+    url: https://discord.gg/XG95vNz4Zu
+    about: Join the Discord community to ask questions and collaborate.

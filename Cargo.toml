@@ -1,0 +1,44 @@
+[package]
+name = "agentopsy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+authors = ["Matthew Mckee <matthewmckee04@yahoo.co.uk>"]
+description = "Local diagnostics for Codex agent sessions"
+license = "MIT"
+repository = "https://github.com/MatthewMckee4/agentopsy"
+
+[workspace]
+resolver = "2"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+option_if_let_else = "allow"
+
+dbg_macro = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+
+[dependencies]
+axum = "0.8.8"
+jiff = "0.2.32"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": [
+    "cargo",
+    "custom.regex",
+    "github-actions",
+    "pre-commit",
+    "rust-toolchain"
+  ],
+  "extends": [
+    "config:recommended",
+    "customManagers:githubActionsVersions",
+    "helpers:pinGitHubActionDigests",
+    "schedule:weekly",
+    ":enablePreCommit"
+  ],
+  "labels": ["dependencies"],
+  "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "groupName": "GitHub Actions",
+      "matchManagers": ["github-actions"]
+    },
+    {
+      "groupName": "pre-commit hooks",
+      "matchManagers": ["pre-commit"]
+    }
+  ]
+}

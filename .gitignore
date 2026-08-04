@@ -1,0 +1,7 @@
+/target
+
+# prek tool cache
+node_modules
+
+# Rust formatter backups
+**/*.rs.bk
