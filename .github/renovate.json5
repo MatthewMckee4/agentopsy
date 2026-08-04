@@ -24,6 +24,11 @@
     {
       "groupName": "pre-commit hooks",
       "matchManagers": ["pre-commit"]
+    },
+    {
+      "enabled": false,
+      "matchFileNames": [".github/workflows/release.yml"],
+      "matchManagers": ["github-actions"]
     }
   ]
 }

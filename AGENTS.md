@@ -73,8 +73,7 @@ lines, and distinguish blockers from improvements.
 ## Verification
 
 - Focused tests: `cargo test <test_name>`.
-- Full suite: `just test`; it uses nextest when installed, otherwise
-  `cargo test`.
+- Full suite: `cargo test --locked`.
 - Clippy: `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 - Run locally: `cargo run --locked`.
 - After workflow changes, run `uvx prek run --files <paths>`; actions must use

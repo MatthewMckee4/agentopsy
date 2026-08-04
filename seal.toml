@@ -1,7 +1,10 @@
 [release]
 current-version = "0.1.0"
 
-version-files = ["Cargo.toml"]
+version-files = [
+    "Cargo.toml",
+    { path = "dist-workspace.toml", field = "workspace.version", format = "toml" }
+]
 
 commit-message = "Release v{version}"
 branch-name = "release/v{version}"

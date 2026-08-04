@@ -1,1 +1,9 @@
 # Configuration for actionlint, run through prek to validate workflows.
+
+# cargo-dist generates shell snippets whose deliberate word splitting and
+# repeated output redirects trigger ShellCheck.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - "shellcheck reported issue in this script: SC2086:.+"
+      - "shellcheck reported issue in this script: SC2129:.+"

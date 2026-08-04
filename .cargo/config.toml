@@ -1,4 +1,0 @@
-# Statically link the C runtime so Windows binaries do not depend on the
-# shared/dynamic MSVC runtime.
-[target.'cfg(all(target_env = "msvc", target_os = "windows"))']
-rustflags = ["-C", "target-feature=+crt-static"]

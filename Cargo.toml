@@ -42,3 +42,7 @@ tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
