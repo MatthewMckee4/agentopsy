@@ -353,6 +353,8 @@ impl<'a> EventHeader<'a> {
 
 #[derive(Clone)]
 struct TurnBuilder {
+    /// Codex-reported active duration; completion envelopes can be persisted late.
+    recorded_duration_ms: Option<u64>,
     ended_at: Option<Timestamp>,
     id: String,
     started_at: Timestamp,
@@ -360,8 +362,9 @@ struct TurnBuilder {
 }
 
 struct RawCall {
-    call_id: String,
+    call_id: Option<String>,
     input: String,
+    line_number: usize,
     name: String,
     started_at: Option<Timestamp>,
     turn_id: Option<String>,
@@ -500,12 +503,15 @@ impl SessionParser {
                     self.end_turn(&payload, timestamp, status);
                 }
             }
-            ("response_item", "function_call" | "custom_tool_call") => {
+            ("response_item", "function_call" | "custom_tool_call" | "tool_search_call") => {
                 if let Some(payload) = self.payload_value(line, line_number) {
-                    self.record_call(&payload, timestamp, line_number);
+                    self.record_call(&payload, payload_type, timestamp, line_number);
                 }
             }
-            ("response_item", "function_call_output" | "custom_tool_call_output") => {
+            (
+                "response_item",
+                "function_call_output" | "custom_tool_call_output" | "tool_search_output",
+            ) => {
                 self.record_output(line, timestamp);
             }
             _ => {}
@@ -550,6 +556,7 @@ impl SessionParser {
                 .map_or_else(|| format!("turn-{line_number}"), ToOwned::to_owned);
             let index = self.turns.len();
             self.turns.push(TurnBuilder {
+                recorded_duration_ms: None,
                 ended_at: None,
                 id: id.clone(),
                 started_at: timestamp,
@@ -563,6 +570,8 @@ impl SessionParser {
     fn end_turn(&mut self, payload: &Value, timestamp: Option<Timestamp>, status: TurnStatus) {
         if let (Some(timestamp), Some(id)) = (timestamp, string_field(payload, "turn_id")) {
             if let Some(index) = self.turn_indexes.get(id).copied() {
+                self.turns[index].recorded_duration_ms =
+                    payload.get("duration_ms").and_then(Value::as_u64);
                 self.turns[index].ended_at = Some(timestamp);
                 self.turns[index].status = status;
             }
@@ -572,27 +581,41 @@ impl SessionParser {
         }
     }
 
-    fn record_call(&mut self, payload: &Value, timestamp: Option<Timestamp>, line_number: usize) {
-        let call_id = string_field(payload, "call_id").map_or_else(
-            || {
-                self.diagnostics.missing_call_ids += 1;
-                format!("missing-call-{line_number}")
-            },
-            ToOwned::to_owned,
-        );
-        if !self.call_ids.insert(call_id.clone()) {
-            self.diagnostics.duplicate_call_ids += 1;
+    fn record_call(
+        &mut self,
+        payload: &Value,
+        payload_type: &str,
+        timestamp: Option<Timestamp>,
+        line_number: usize,
+    ) {
+        let call_id = string_field(payload, "call_id").map(ToOwned::to_owned);
+        if let Some(call_id) = &call_id {
+            if !self.call_ids.insert(call_id.clone()) {
+                self.diagnostics.duplicate_call_ids += 1;
+            }
+        } else {
+            self.diagnostics.missing_call_ids += 1;
         }
         let name = string_field(payload, "name")
-            .unwrap_or("unknown")
+            .unwrap_or(if payload_type == "tool_search_call" {
+                "tool_search"
+            } else {
+                "unknown"
+            })
             .to_owned();
-        let input = string_field(payload, "arguments")
-            .or_else(|| string_field(payload, "input"))
-            .unwrap_or_default()
-            .to_owned();
+        let input = payload
+            .get("arguments")
+            .or_else(|| payload.get("input"))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), ToOwned::to_owned)
+            })
+            .unwrap_or_default();
         self.calls.push(RawCall {
             call_id,
             input,
+            line_number,
             name,
             started_at: timestamp,
             turn_id: self.active_turn.clone(),
@@ -728,6 +751,7 @@ fn finalize_turns(
     {
         diagnostics.inferred_turns = 1;
         builders.push(TurnBuilder {
+            recorded_duration_ms: None,
             ended_at: Some(ended_at),
             id: "inferred-turn".to_owned(),
             started_at,
@@ -744,7 +768,9 @@ fn finalize_turns(
                 .or(fallback_end)
                 .unwrap_or(builder.started_at);
             Turn {
-                duration_ms: elapsed_ms(builder.started_at, ended_at),
+                duration_ms: builder
+                    .recorded_duration_ms
+                    .unwrap_or_else(|| elapsed_ms(builder.started_at, ended_at)),
                 ended_at,
                 id: builder.id,
                 started_at: builder.started_at,
@@ -767,7 +793,10 @@ fn finalize_operations(
     calls
         .into_iter()
         .map(|call| {
-            let output = outputs.remove(&call.call_id);
+            let output = call
+                .call_id
+                .as_ref()
+                .and_then(|call_id| outputs.remove(call_id));
             let duration_ms = match (
                 call.started_at,
                 output.as_ref().and_then(|item| item.timestamp),
@@ -798,7 +827,9 @@ fn finalize_operations(
             }
             let (name, preview) = tool_summary(&call.name, &call.input);
             Operation {
-                call_id: call.call_id,
+                call_id: call
+                    .call_id
+                    .unwrap_or_else(|| format!("missing-call-line-{}", call.line_number)),
                 duration_ms,
                 ended_at: output.and_then(|item| item.timestamp),
                 name,
@@ -1085,6 +1116,79 @@ mod tests {
         assert_eq!(session.operations[0].duration_ms, Some(2_000));
         assert_eq!(session.operations[0].status, OperationStatus::Failed);
         assert_eq!(session.operations[0].preview, "cargo test");
+    }
+
+    #[test]
+    fn uses_recorded_turn_duration_when_completion_is_persisted_late() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","started_at":1767225600,"turn_id":"one"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T01:00:00Z","type":"event_msg","payload":{"type":"task_complete","completed_at":1767225605,"duration_ms":5000,"turn_id":"one"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.active_duration_ms, 5_000);
+        assert_eq!(session.tool_duration_ms, 2_000);
+        assert_eq!(session.model_duration_ms, 3_000);
+    }
+
+    #[test]
+    fn matches_tool_search_events_and_previews_object_arguments() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"tool_search_call","arguments":{"query":"Rust tests"},"call_id":"search","status":"completed"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"search","status":"completed","tools":[]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.operations.len(), 1);
+        assert_eq!(session.operations[0].name, "tool_search");
+        assert_eq!(session.operations[0].preview, "Rust tests");
+        assert_eq!(session.operations[0].status, OperationStatus::Returned);
+        assert_eq!(session.diagnostics.matched_calls, 1);
+    }
+
+    #[test]
+    fn missing_call_id_cannot_match_a_real_output_id() {
+        let trace = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"missing-call-line-2","output":"done"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#,
+        );
+
+        let session = parse_reader(
+            Cursor::new(trace),
+            "trace.jsonl".to_owned(),
+            trace.len() as u64,
+        );
+
+        assert_eq!(session.operations[0].status, OperationStatus::Pending);
+        assert_eq!(session.diagnostics.missing_call_ids, 1);
+        assert_eq!(session.diagnostics.matched_calls, 0);
+        assert_eq!(session.diagnostics.unmatched_calls, 1);
+        assert_eq!(session.diagnostics.unmatched_outputs, 1);
     }
 
     #[test]
