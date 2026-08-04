@@ -2,25 +2,28 @@ use std::cmp::Reverse;
 use std::fmt::{self, Write};
 use std::path::Path;
 
-use crate::trace::{Dashboard, Diagnostics, Operation, Session, Turn};
+use crate::trace::{Dashboard, Diagnostics, Operation, Session, Turn, saturating_sum};
 
 pub fn render(dashboard: &Dashboard) -> Result<String, fmt::Error> {
     let mut html = String::from(HEAD);
-    let total_active = dashboard
-        .sessions
-        .iter()
-        .map(|session| session.active_duration_ms)
-        .sum();
-    let total_tool = dashboard
-        .sessions
-        .iter()
-        .map(|session| session.tool_duration_ms)
-        .sum();
-    let total_model = dashboard
-        .sessions
-        .iter()
-        .map(|session| session.model_duration_ms)
-        .sum();
+    let total_active = saturating_sum(
+        dashboard
+            .sessions
+            .iter()
+            .map(|session| session.active_duration_ms),
+    );
+    let total_tool = saturating_sum(
+        dashboard
+            .sessions
+            .iter()
+            .map(|session| session.tool_duration_ms),
+    );
+    let total_model = saturating_sum(
+        dashboard
+            .sessions
+            .iter()
+            .map(|session| session.model_duration_ms),
+    );
     let open_sessions = dashboard
         .sessions
         .iter()
@@ -30,8 +33,8 @@ pub fn render(dashboard: &Dashboard) -> Result<String, fmt::Error> {
         .sessions
         .iter()
         .map(|session| anomaly_count(&session.diagnostics))
-        .sum::<usize>()
-        + dashboard.scan_errors.len();
+        .fold(0, usize::saturating_add)
+        .saturating_add(dashboard.scan_errors.len());
 
     write!(
         html,
@@ -398,15 +401,14 @@ fn diagnostic(html: &mut String, label: &str, value: impl fmt::Display) -> fmt::
 }
 
 const fn anomaly_count(diagnostics: &Diagnostics) -> usize {
-    diagnostics.parse_errors.len()
-        + diagnostics.invalid_timestamps
-        + diagnostics.unmatched_calls
-        + diagnostics.unmatched_outputs
-        + diagnostics.duplicate_call_ids
-        + diagnostics.duplicate_output_ids
-        + diagnostics.missing_call_ids
-        + diagnostics.missing_output_ids
-        + diagnostics.unassigned_calls
+    diagnostics
+        .parse_errors
+        .len()
+        .saturating_add(diagnostics.unmatched_calls)
+        .saturating_add(diagnostics.unmatched_outputs)
+        .saturating_add(diagnostics.missing_call_ids)
+        .saturating_add(diagnostics.missing_output_ids)
+        .saturating_add(diagnostics.unassigned_calls)
 }
 
 fn project_name(cwd: &str) -> String {
