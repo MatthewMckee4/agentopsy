@@ -509,7 +509,8 @@ const filter=document.querySelector('#filter');
 const sessions=[...document.querySelectorAll('[data-search]')];
 filter.addEventListener('input',()=>{const query=filter.value.trim().toLowerCase();for(const session of sessions)session.hidden=!session.dataset.search.includes(query)});
 const details=[...document.querySelectorAll('[data-session-key]')];
-const saved=JSON.parse(sessionStorage.getItem('agentopsy-open')||'null');
+let saved=null;
+try{saved=JSON.parse(sessionStorage.getItem('agentopsy-open')||'null')}catch(error){console.warn('Agentopsy ignored invalid saved open state',error);sessionStorage.removeItem('agentopsy-open')}
 if(Array.isArray(saved)){for(const detail of details)detail.open=saved.includes(detail.dataset.sessionKey)}
 for(const detail of details)detail.addEventListener('toggle',()=>sessionStorage.setItem('agentopsy-open',JSON.stringify(details.filter(item=>item.open).map(item=>item.dataset.sessionKey))));
 document.querySelector('#refresh').addEventListener('click',()=>location.reload());
