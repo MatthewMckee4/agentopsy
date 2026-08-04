@@ -70,7 +70,6 @@ jobs:
             ':!LICENSE' \
             ':!README.md' \
             ':!SECURITY.md' \
-            ':!justfile' \
             ':!seal.toml' \
           ; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -180,6 +179,24 @@ jobs:
       - name: Run tests
         run: cargo nextest run --locked --profile ci
 
+  cargo-dist:
+    name: "cargo dist"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+
+      - name: Validate release plan and workflow
+        run: |
+          dist plan
+          dist generate --check
+
   ci-gate:
     name: "CI gate"
     runs-on: ubuntu-latest
@@ -191,6 +208,7 @@ jobs:
       - cargo-clippy
       - cargo-shear
       - cargo-test
+      - cargo-dist
     if: ${{ always() }}
 
     steps:
@@ -200,6 +218,7 @@ jobs:
           CARGO_FMT_RESULT: ${{ needs.cargo-fmt.result }}
           CARGO_SHEAR_RESULT: ${{ needs.cargo-shear.result }}
           CARGO_TEST_RESULT: ${{ needs.cargo-test.result }}
+          CARGO_DIST_RESULT: ${{ needs.cargo-dist.result }}
           CODE_CHANGED: ${{ needs.determine_changes.outputs.code }}
           DETERMINE_CHANGES_RESULT: ${{ needs.determine_changes.result }}
           PRE_COMMIT_RESULT: ${{ needs.pre-commit.result }}
@@ -230,6 +249,7 @@ jobs:
 
           require_success "determine changes" "$DETERMINE_CHANGES_RESULT"
           require_success "pre commit" "$PRE_COMMIT_RESULT"
+          require_success "cargo dist" "$CARGO_DIST_RESULT"
 
           if [ "$CODE_CHANGED" != "true" ] && [ "$CODE_CHANGED" != "false" ]; then
             echo "::error::determine changes produced unexpected code output '$CODE_CHANGED'"
