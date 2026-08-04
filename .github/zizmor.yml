@@ -1,8 +1,4 @@
 rules:
-  unpinned-uses:
-    config:
-      policies:
-        dtolnay/rust-toolchain: any
   template-injection:
     ignore:
       # cargo-dist generates these expressions from its own plan output.

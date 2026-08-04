@@ -37,7 +37,7 @@ targets = [
 # Whether dist should create a GitHub Release or use an existing draft
 create-release = true
 # Which actions to run on pull requests
-pr-run-mode = "plan"
+pr-run-mode = "skip"
 # Whether CI should trigger releases with dispatches instead of tag pushes
 dispatch-releases = true
 # Which phase dist should use to create the GitHub release
