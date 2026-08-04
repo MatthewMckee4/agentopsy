@@ -19,9 +19,20 @@ unix-archive = ".tar.gz"
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "arm-unknown-linux-musleabihf",
+    "armv7-unknown-linux-gnueabihf",
+    "armv7-unknown-linux-musleabihf",
     "x86_64-apple-darwin",
+    "powerpc64-unknown-linux-gnu",
+    "powerpc64le-unknown-linux-gnu",
+    "riscv64gc-unknown-linux-gnu",
+    "s390x-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
+    "i686-unknown-linux-gnu",
+    "i686-unknown-linux-musl",
 ]
 # Whether dist should create a GitHub Release or use an existing draft
 create-release = true
